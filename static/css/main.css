@@ -1,0 +1,118 @@
+body {
+    color: black;
+    text-align: center;
+    font-family: Arial, sans-serif;
+    --header: #987bc3;
+    --highlight: #c8a5eb;
+    --background: #e6e6e6;
+    --button: rgb(152, 81, 255);
+    --text: white;
+    background-color: var(--background);
+}
+
+body.darkmode {
+    color: white;
+    --header: #2c0d5b;
+    --highlight: #412260;
+    --background: rgb(12, 0, 23);
+    --button: rgb(67, 0, 166);
+}
+
+input {
+    padding: 10px;
+    background-color: var(--button);
+    color: white;
+    border-style: none;
+    border-radius: 5px;
+    margin-top: 5px;
+    box-shadow: black 5px 5px 5px;
+}
+
+button {
+    padding: 10px;
+    background-color: var(--button);
+    border-style: none;
+    border-radius: 5px;
+    margin-top: 5px;
+    box-shadow: black 5px 5px 5px;
+    color: #ffffff;
+}
+
+.pswdbox {
+    margin-top: 5px;
+}
+
+img {
+    border-radius: 10px;
+    box-shadow: black 5px 5px 5px;
+    background-color: white;
+}
+
+.spacer {
+    margin-top: 5px;
+}
+
+.spacer2 {
+    margin-top: 30px;
+}
+
+input[type="password"],
+input[type="text"] {
+    background-color: #ffffff;
+    color: black;
+}
+
+.headerbar {
+    position: fixed;
+    top: 15px;
+    left: 15px;
+    right: 15px;
+    background-color: var(--header);
+    height: 60px;
+    align-items: center;
+    display: flex;
+    border-radius: 15px;
+    box-shadow: black 5px 5px 5px;
+}
+
+.content {
+    position: fixed;
+    margin-left: 20px;
+    left: 0;
+    right: 0;
+    top: 80px;
+}
+
+.a {
+    padding: 20px;
+    font-size: 18px;
+    text-decoration: none;
+    color: white;
+    margin: 0;
+    background-color: transparent;
+    box-shadow: none;
+}
+
+.a:hover {
+    background-color: var(--button);
+    text-decoration: none;
+    border-radius: 15px;
+    box-shadow: black 5px 5px 5px;
+}
+
+.main {
+    font-size: 20px;
+    text-decoration: none;
+    background-color: var(--highlight);
+    border-radius: 15px;
+    box-shadow: black 5px 5px 5px;
+
+}
+
+.right {
+    margin-left: auto;
+}
+
+li {
+    list-style-type: none;
+}
