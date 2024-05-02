@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"fmt"
 	"os"
@@ -19,6 +20,13 @@ import (
 )
 
 const salt_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+var DBLOCATION = "/var/lib/maddy/credentials.db"
+
+func get_db_connection() *sql.DB {
+	db, _ := sql.Open("sqlite3", DBLOCATION)
+	return db
+}
 
 func genSalt(length int) string {
 	if length <= 0 {
@@ -63,7 +71,7 @@ func main() {
 	SECRET_KEY := viper.GetString("Config.secretkey")
 	PORT := viper.GetString("Config.port")
 	HOST := viper.GetString("Config.host")
-	//DBLOCATION := viper.GetString("Config.dblocation")
+	DBLOCATION = viper.GetString("Config.dblocation")
 
 	if SECRET_KEY == "supersecretkey" {
 		fmt.Println("[WARNING] Secret key not set. Please set the secret key to a non-default value.")
@@ -93,30 +101,90 @@ func main() {
 
 	router.GET("/login", func(c *gin.Context) {
 		session := sessions.Default(c)
+		sessionid := genSalt(512)
 		session.Options(sessions.Options{
 			SameSite: 3,
 		})
 		data, err := captcha.New(500, 100)
 		if err != nil {
+			fmt.Println("[ERROR] Failed to generate captcha at", time.Now().Unix(), err)
 			c.String(500, "Failed to generate captcha")
 			return
 		}
 		session.Set("captcha", data.Text)
+		session.Set("id", sessionid)
 		err = session.Save()
 		if err != nil {
+			fmt.Println("[ERROR] Failed to save session in /login at", time.Now().Unix(), err)
 			c.String(500, "Failed to save session")
 			return
 		}
 		var b64bytes bytes.Buffer
 		err = data.WriteImage(&b64bytes)
 		if err != nil {
+			fmt.Println("[ERROR] Failed to encode captcha at", time.Now().Unix(), err)
 			c.String(500, "Failed to encode captcha")
 			return
 		}
 		c.HTML(200, "main.html", gin.H{
 			"captcha_image": base64.StdEncoding.EncodeToString(b64bytes.Bytes()),
-			"unique_token":  genSalt(512),
+			"unique_token":  sessionid,
 		})
+	})
+
+	router.POST("/api/signup", func(c *gin.Context) {
+		err := c.Request.ParseForm()
+		if err != nil {
+			c.String(400, "Failed to parse form")
+			return
+		}
+		data := c.Request.Form
+		session := sessions.Default(c)
+
+		if data.Get("captcha") != session.Get("captcha") {
+			c.HTML(200, "badcaptcha.html", gin.H{})
+			return
+		}
+
+		if data.Get("unique_token") != session.Get("id") {
+			c.HTML(200, "badtoken.html", gin.H{})
+			return
+		}
+
+		session.Delete("captcha")
+		session.Delete("id")
+
+		err = session.Save()
+		if err != nil {
+			fmt.Println("[ERROR] Failed to save session in /api/signup at", time.Now().Unix(), err)
+			c.String(500, "Failed to save session")
+			return
+		}
+
+		conn := get_db_connection()
+		defer func(conn *sql.DB) {
+			err := conn.Close()
+			if err != nil {
+				fmt.Println("[ERROR] Failed to defer database connection at", time.Now().Unix(), err)
+				c.String(500, "Failed to defer database connection")
+				return
+			}
+		}(conn)
+
+		hashedpass, err := computeBcrypt(10, data.Get("password"))
+		if err != nil {
+			fmt.Println("[ERROR] Failed to hash password connection at", time.Now().Unix(), err)
+			c.String(500, "Failed to hash password")
+			return
+		}
+
+		_, err = conn.Exec("INSERT INTO passwords (key, value) VALUES (?, ?)", data.Get("username"), hashedpass)
+		if err != nil {
+			c.HTML(500, "taken.html", gin.H{})
+			return
+		}
+
+		c.HTML(200, "postsignup.html", gin.H{})
 	})
 
 	fmt.Println("[INFO] Server started at", time.Now().Unix())
