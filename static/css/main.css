@@ -20,8 +20,6 @@ body.darkmode {
 
 input {
     padding: 10px;
-    background-color: var(--button);
-    color: white;
     border-style: none;
     border-radius: 5px;
     margin-top: 5px;
@@ -29,6 +27,11 @@ input {
 }
 
 button {
+    border-style: none;
+}
+
+.button {
+    text-decoration: none;
     padding: 10px;
     background-color: var(--button);
     border-style: none;
@@ -36,6 +39,19 @@ button {
     margin-top: 5px;
     box-shadow: black 5px 5px 5px;
     color: #ffffff;
+}
+
+.logout {
+    display: block;
+    margin-top: 15px;
+    width: 65px;
+    margin-left: calc(50% - 45px);
+    z-index: 0;
+    position: absolute;
+}
+
+.button:hover {
+    background-color: var(--header);
 }
 
 .pswdbox {

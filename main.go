@@ -5,9 +5,13 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"centrifuge.hectabit.org/HectaBit/captcha"
@@ -19,7 +23,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const salt_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+const salt_chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNOPQRSTUVWXYZ23456789"
 
 var DBLOCATION = "/var/lib/maddy/credentials.db"
 
@@ -51,11 +55,11 @@ func computeBcrypt(cost int, pass string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return string(hash), nil
+	return "bcrypt:" + string(hash), nil
 }
 
-func verifyBcrypt(pass, hashSalt string) error {
-	return bcrypt.CompareHashAndPassword([]byte(hashSalt), []byte(pass))
+func verifyBcrypt(hash, pass string) error {
+	return bcrypt.CompareHashAndPassword([]byte(strings.TrimPrefix(hash, "bcrypt:")), []byte(pass))
 }
 
 func main() {
@@ -99,7 +103,7 @@ func main() {
 		c.Next()
 	})
 
-	router.GET("/login", func(c *gin.Context) {
+	router.GET("/signup", func(c *gin.Context) {
 		session := sessions.Default(c)
 		sessionid := genSalt(512)
 		session.Options(sessions.Options{
@@ -107,7 +111,7 @@ func main() {
 		})
 		data, err := captcha.New(500, 100)
 		if err != nil {
-			fmt.Println("[ERROR] Failed to generate captcha at", time.Now().Unix(), err)
+			fmt.Println("[ERROR] Failed to generate captcha at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
 			c.String(500, "Failed to generate captcha")
 			return
 		}
@@ -115,39 +119,54 @@ func main() {
 		session.Set("id", sessionid)
 		err = session.Save()
 		if err != nil {
-			fmt.Println("[ERROR] Failed to save session in /login at", time.Now().Unix(), err)
+			fmt.Println("[ERROR] Failed to save session in /login at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
 			c.String(500, "Failed to save session")
 			return
 		}
 		var b64bytes bytes.Buffer
 		err = data.WriteImage(&b64bytes)
 		if err != nil {
-			fmt.Println("[ERROR] Failed to encode captcha at", time.Now().Unix(), err)
+			fmt.Println("[ERROR] Failed to encode captcha at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
 			c.String(500, "Failed to encode captcha")
 			return
 		}
-		c.HTML(200, "main.html", gin.H{
+		c.HTML(200, "signup.html", gin.H{
 			"captcha_image": base64.StdEncoding.EncodeToString(b64bytes.Bytes()),
 			"unique_token":  sessionid,
 		})
 	})
 
+	router.GET("/account", func(c *gin.Context) {
+		loggedin, err := c.Cookie("loggedin")
+		if errors.Is(err, http.ErrNoCookie) || loggedin != "true" {
+			c.HTML(200, "login.html", gin.H{})
+			return
+		} else {
+			c.HTML(200, "dashboard.html", gin.H{})
+		}
+	})
+
 	router.POST("/api/signup", func(c *gin.Context) {
-		err := c.Request.ParseForm()
+		var data map[string]interface{}
+		err := c.ShouldBindJSON(&data)
 		if err != nil {
-			c.String(400, "Failed to parse form")
+			c.JSON(400, gin.H{"error": "Invalid JSON"})
 			return
 		}
-		data := c.Request.Form
 		session := sessions.Default(c)
 
-		if data.Get("captcha") != session.Get("captcha") {
-			c.HTML(200, "badcaptcha.html", gin.H{})
+		if data["unique_token"].(string) != session.Get("id") {
+			c.HTML(403, "badtoken.html", gin.H{})
 			return
 		}
 
-		if data.Get("unique_token") != session.Get("id") {
-			c.HTML(200, "badtoken.html", gin.H{})
+		if data["captcha"].(string) != session.Get("captcha") {
+			c.HTML(400, "badcaptcha.html", gin.H{})
+			return
+		}
+
+		if !regexp.MustCompile(`^[a-zA-Z0-9.]+$`).MatchString(data["username"].(string)) {
+			c.String(402, "Invalid username")
 			return
 		}
 
@@ -156,7 +175,7 @@ func main() {
 
 		err = session.Save()
 		if err != nil {
-			fmt.Println("[ERROR] Failed to save session in /api/signup at", time.Now().Unix(), err)
+			fmt.Println("[ERROR] Failed to save session in /api/signup at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
 			c.String(500, "Failed to save session")
 			return
 		}
@@ -165,26 +184,211 @@ func main() {
 		defer func(conn *sql.DB) {
 			err := conn.Close()
 			if err != nil {
-				fmt.Println("[ERROR] Failed to defer database connection at", time.Now().Unix(), err)
+				fmt.Println("[ERROR] Failed to defer database connection in /api/signup at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
 				c.String(500, "Failed to defer database connection")
 				return
 			}
 		}(conn)
 
-		hashedpass, err := computeBcrypt(10, data.Get("password"))
+		hashedpass, err := computeBcrypt(10, data["password"].(string))
 		if err != nil {
-			fmt.Println("[ERROR] Failed to hash password connection at", time.Now().Unix(), err)
+			fmt.Println("[ERROR] Failed to hash password in /api/signup at", time.Now().Unix(), err)
 			c.String(500, "Failed to hash password")
 			return
 		}
 
-		_, err = conn.Exec("INSERT INTO passwords (key, value) VALUES (?, ?)", data.Get("username"), hashedpass)
+		_, err = conn.Exec("INSERT INTO passwords (key, value) VALUES (?, ?)", data["username"].(string), hashedpass)
 		if err != nil {
-			c.HTML(500, "taken.html", gin.H{})
+			c.String(501, "Username taken")
 			return
 		}
 
-		c.HTML(200, "postsignup.html", gin.H{})
+		c.String(200, "Success")
+	})
+
+	router.POST("/api/login", func(c *gin.Context) {
+		var data map[string]interface{}
+		err := c.ShouldBindJSON(&data)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid JSON"})
+			return
+		}
+
+		conn := get_db_connection()
+		defer func(conn *sql.DB) {
+			err := conn.Close()
+			if err != nil {
+				fmt.Println("[ERROR] Failed to defer database connection at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+				c.String(500, "Failed to defer database connection")
+				return
+			}
+		}(conn)
+
+		var rows string
+		err = conn.QueryRow("SELECT value FROM passwords WHERE key = ?", data["username"].(string)).Scan(&rows)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				c.String(401, "Invalid username")
+				return
+			} else {
+				fmt.Println("[ERROR] Failed to query database in /api/login at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+				c.String(500, "Failed to query database")
+				return
+			}
+		}
+
+		err = verifyBcrypt(rows, data["password"].(string))
+		if err != nil {
+			c.String(403, "Password is incorrect")
+			return
+		}
+
+		c.JSON(200, gin.H{"password": rows})
+	})
+
+	router.POST("/api/deleteacct", func(c *gin.Context) {
+		var data map[string]interface{}
+		err := c.ShouldBindJSON(&data)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid JSON"})
+			return
+		}
+
+		conn := get_db_connection()
+		defer func(conn *sql.DB) {
+			err := conn.Close()
+			if err != nil {
+				fmt.Println("[ERROR] Failed to defer database connection in /api/deleteacct at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+				c.String(500, "Failed to defer database connection")
+				return
+			}
+		}(conn)
+
+		result, err := conn.Exec("DELETE FROM passwords WHERE key = ? AND value = ?", data["username"].(string), data["password"].(string))
+		if err != nil {
+			fmt.Println("[ERROR] Failed to query database in /api/deleteacct at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+			c.String(500, "Failed to query database")
+		} else {
+			rowsaffected, err := result.RowsAffected()
+			if err != nil {
+				fmt.Println("[ERROR] Failed to get rows affected in /api/deleteacct at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+				c.String(500, "Failed to get rows affected")
+			} else {
+				if rowsaffected == int64(0) {
+					c.String(401, "Invalid username or password")
+				} else {
+					c.String(200, "Success")
+				}
+			}
+		}
+	})
+
+	router.POST("/api/changepass", func(c *gin.Context) {
+		var data map[string]interface{}
+		err := c.ShouldBindJSON(&data)
+		if err != nil {
+			c.JSON(400, gin.H{"error": "Invalid JSON"})
+			return
+		}
+
+		conn := get_db_connection()
+		defer func(conn *sql.DB) {
+			err := conn.Close()
+			if err != nil {
+				fmt.Println("[ERROR] Failed to defer database connection in /api/changepass at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+				c.String(500, "Failed to defer database connection")
+				return
+			}
+		}(conn)
+
+		newhash, err := computeBcrypt(10, data["newpass"].(string))
+		if err != nil {
+			fmt.Println("[ERROR] Failed to hash password in /api/changepass at", time.Now().Unix(), err)
+			c.String(500, "Failed to hash password")
+			return
+		}
+
+		result, err := conn.Exec("UPDATE passwords SET value = ? WHERE key = ? AND value = ?", newhash, data["username"].(string), data["password"].(string))
+		if err != nil {
+			fmt.Println("[ERROR] Failed to query database in /api/changepass at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+			c.String(500, "Failed to query database")
+		} else {
+			rowsaffected, err := result.RowsAffected()
+			if err != nil {
+				fmt.Println("[ERROR] Failed to get rows affected in /api/changepass at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+				c.String(500, "Failed to get rows affected")
+			} else {
+				if rowsaffected == int64(0) {
+					c.String(401, "Invalid username or password")
+				} else {
+					c.JSON(200, gin.H{"password": newhash})
+				}
+			}
+		}
+	})
+
+	router.GET("/account/logout", func(c *gin.Context) {
+		c.HTML(200, "logout.html", gin.H{})
+	})
+
+	router.GET("/account/deleteacct", func(c *gin.Context) {
+		c.HTML(200, "deleteacct.html", gin.H{})
+	})
+
+	router.GET("/account/changepass", func(c *gin.Context) {
+		c.HTML(200, "changepass.html", gin.H{})
+	})
+
+	router.GET("/usererror", func(c *gin.Context) {
+		c.HTML(200, "usererror.html", gin.H{})
+	})
+
+	router.GET("/accounterror", func(c *gin.Context) {
+		c.HTML(200, "accounterror.html", gin.H{})
+	})
+
+	router.GET("/badcaptcha", func(c *gin.Context) {
+		c.HTML(200, "badcaptcha.html", gin.H{})
+	})
+
+	router.GET("/signuperror", func(c *gin.Context) {
+		c.HTML(200, "signuperror.html", gin.H{})
+	})
+
+	router.GET("/loginerror", func(c *gin.Context) {
+		c.HTML(200, "loginerror.html", gin.H{})
+	})
+
+	router.GET("/invalidtoken", func(c *gin.Context) {
+		c.HTML(200, "invalidtoken.html", gin.H{})
+	})
+
+	router.GET("/invaliduser", func(c *gin.Context) {
+		c.HTML(200, "invaliduser.html", gin.H{})
+	})
+
+	router.GET("/badpassword", func(c *gin.Context) {
+		c.HTML(200, "badpassword.html", gin.H{})
+	})
+
+	router.GET("/baduser", func(c *gin.Context) {
+		c.HTML(200, "baduser.html", gin.H{})
+	})
+
+	router.GET("/success", func(c *gin.Context) {
+		c.HTML(200, "success.html", gin.H{})
+	})
+
+	router.GET("/taken", func(c *gin.Context) {
+		c.HTML(200, "taken.html", gin.H{})
+	})
+
+	router.GET("/", func(c *gin.Context) {
+		c.HTML(200, "index.html", gin.H{})
+	})
+
+	router.GET("/cta", func(c *gin.Context) {
+		c.HTML(200, "cta.html", gin.H{})
 	})
 
 	fmt.Println("[INFO] Server started at", time.Now().Unix())
