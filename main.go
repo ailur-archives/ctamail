@@ -149,7 +149,7 @@ func main() {
 	})
 
 	router.GET("/account", func(c *gin.Context) {
-		loggedIn, err := c.Cookie("loggedIn")
+		loggedIn, err := c.Cookie("loggedin")
 		if errors.Is(err, http.ErrNoCookie) || loggedIn != "true" {
 			c.HTML(200, "login.html", gin.H{})
 			return
