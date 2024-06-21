@@ -6,9 +6,8 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"errors"
-	"fmt"
+	"log"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -23,31 +22,29 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const salt_chars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNOPQRSTUVWXYZ23456789"
+const saltChars = "abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNOPQRSTUVWXYZ23456789"
 
-var DBLOCATION = "/var/lib/maddy/credentials.db"
+var (
+	dbLocation = "/var/lib/maddy/credentials.db"
+	conn       *sql.DB
+)
 
-func get_db_connection() *sql.DB {
-	db, _ := sql.Open("sqlite3", DBLOCATION)
-	return db
-}
-
-func genSalt(length int) string {
+func genSalt(length int) (string, error) {
 	if length <= 0 {
-		fmt.Println("[ERROR] Known in genSalt() at", strconv.FormatInt(time.Now().Unix(), 10)+":", "Salt length must be at least one.")
+		return "", errors.New("salt length must be greater than 0")
 	}
 
 	salt := make([]byte, length)
 	randomBytes := make([]byte, length)
 	_, err := rand.Read(randomBytes)
 	if err != nil {
-		fmt.Println("[ERROR] Unknown in genSalt() at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+		return "", err
 	}
 
 	for i := range salt {
-		salt[i] = salt_chars[int(randomBytes[i])%len(salt_chars)]
+		salt[i] = saltChars[int(randomBytes[i])%len(saltChars)]
 	}
-	return string(salt)
+	return string(salt), nil
 }
 
 func computeBcrypt(cost int, pass string) (string, error) {
@@ -68,25 +65,35 @@ func main() {
 	viper.AutomaticEnv()
 
 	if err := viper.ReadInConfig(); err != nil {
-		fmt.Println("[FATAL] Error in config file at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-		os.Exit(1)
+		log.Fatalln("[FATAL] Error in config file at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
 	}
 
-	SECRET_KEY := viper.GetString("Config.secretkey")
-	PORT := viper.GetString("Config.port")
-	HOST := viper.GetString("Config.host")
-	DBLOCATION = viper.GetString("Config.dblocation")
+	secretKey := viper.GetString("Config.secretkey")
+	port := viper.GetString("Config.port")
+	host := viper.GetString("Config.host")
+	dbLocation = viper.GetString("Config.dblocation")
+	var err error
+	conn, err = sql.Open("sqlite3", dbLocation)
+	if err != nil {
+		log.Fatalln("[FATAL] Failed to open database at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+	}
+	defer func(conn *sql.DB) {
+		err := conn.Close()
+		if err != nil {
+			log.Fatalln("[FATAL] Failed to defer database connection in main() at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+		}
+	}(conn)
 
-	if SECRET_KEY == "supersecretkey" {
-		fmt.Println("[WARNING] Secret key not set. Please set the secret key to a non-default value.")
+	if secretKey == "supersecretkey" {
+		log.Println("[WARNING] Secret key not set. Please set the secret key to a non-default value.")
 	}
 
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.LoadHTMLGlob("templates/*")
 	router.Static("/static", "./static")
-	store := cookie.NewStore([]byte(SECRET_KEY))
-	router.Use(sessions.Sessions("currentsession", store))
+	store := cookie.NewStore([]byte(secretKey))
+	router.Use(sessions.Sessions("currentSession", store))
 
 	// Enable CORS
 	router.Use(func(c *gin.Context) {
@@ -105,40 +112,45 @@ func main() {
 
 	router.GET("/signup", func(c *gin.Context) {
 		session := sessions.Default(c)
-		sessionid := genSalt(512)
+		sessionId, err := genSalt(512)
+		if err != nil {
+			log.Println("[ERROR] Failed to generate session ID at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+			c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-SIGNUP-SESSIONIDGEN")
+			return
+		}
 		session.Options(sessions.Options{
 			SameSite: 3,
 		})
 		data, err := captcha.New(500, 100)
 		if err != nil {
-			fmt.Println("[ERROR] Failed to generate captcha at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-			c.String(500, "Failed to generate captcha")
+			log.Println("[ERROR] Failed to generate captcha at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+			c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-SIGNUP-CAPTCHAGEN")
 			return
 		}
 		session.Set("captcha", data.Text)
-		session.Set("id", sessionid)
+		session.Set("id", sessionId)
 		err = session.Save()
 		if err != nil {
-			fmt.Println("[ERROR] Failed to save session in /login at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-			c.String(500, "Failed to save session")
+			log.Println("[ERROR] Failed to save session in /login at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+			c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-SIGNUP-SESSIONSAVE")
 			return
 		}
 		var b64bytes bytes.Buffer
 		err = data.WriteImage(&b64bytes)
 		if err != nil {
-			fmt.Println("[ERROR] Failed to encode captcha at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-			c.String(500, "Failed to encode captcha")
+			log.Println("[ERROR] Failed to encode captcha at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+			c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-SIGNUP-CAPTCHAENCODE")
 			return
 		}
 		c.HTML(200, "signup.html", gin.H{
 			"captcha_image": base64.StdEncoding.EncodeToString(b64bytes.Bytes()),
-			"unique_token":  sessionid,
+			"unique_token":  sessionId,
 		})
 	})
 
 	router.GET("/account", func(c *gin.Context) {
-		loggedin, err := c.Cookie("loggedin")
-		if errors.Is(err, http.ErrNoCookie) || loggedin != "true" {
+		loggedIn, err := c.Cookie("loggedIn")
+		if errors.Is(err, http.ErrNoCookie) || loggedIn != "true" {
 			c.HTML(200, "login.html", gin.H{})
 			return
 		} else {
@@ -175,29 +187,19 @@ func main() {
 
 		err = session.Save()
 		if err != nil {
-			fmt.Println("[ERROR] Failed to save session in /api/signup at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-			c.String(500, "Failed to save session")
+			log.Println("[ERROR] Failed to save session in /api/signup at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+			c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-API-SIGNUP-SESSIONSAVE")
 			return
 		}
 
-		conn := get_db_connection()
-		defer func(conn *sql.DB) {
-			err := conn.Close()
-			if err != nil {
-				fmt.Println("[ERROR] Failed to defer database connection in /api/signup at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-				c.String(500, "Failed to defer database connection")
-				return
-			}
-		}(conn)
-
-		hashedpass, err := computeBcrypt(10, data["password"].(string))
+		hashedPassword, err := computeBcrypt(10, data["password"].(string))
 		if err != nil {
-			fmt.Println("[ERROR] Failed to hash password in /api/signup at", time.Now().Unix(), err)
-			c.String(500, "Failed to hash password")
+			log.Println("[ERROR] Failed to hash password in /api/signup at", time.Now().Unix(), err)
+			c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-API-SIGNUP-PASSHASH")
 			return
 		}
 
-		_, err = conn.Exec("INSERT INTO passwords (key, value) VALUES (?, ?)", data["username"].(string), hashedpass)
+		_, err = conn.Exec("INSERT INTO passwords (key, value) VALUES (?, ?)", data["username"].(string), hashedPassword)
 		if err != nil {
 			c.String(501, "Username taken")
 			return
@@ -214,16 +216,6 @@ func main() {
 			return
 		}
 
-		conn := get_db_connection()
-		defer func(conn *sql.DB) {
-			err := conn.Close()
-			if err != nil {
-				fmt.Println("[ERROR] Failed to defer database connection at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-				c.String(500, "Failed to defer database connection")
-				return
-			}
-		}(conn)
-
 		var rows string
 		err = conn.QueryRow("SELECT value FROM passwords WHERE key = ?", data["username"].(string)).Scan(&rows)
 		if err != nil {
@@ -231,8 +223,8 @@ func main() {
 				c.String(401, "Invalid username")
 				return
 			} else {
-				fmt.Println("[ERROR] Failed to query database in /api/login at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-				c.String(500, "Failed to query database")
+				log.Println("[ERROR] Failed to query database in /api/login at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+				c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-API-LOGIN-DBQUERY")
 				return
 			}
 		}
@@ -254,27 +246,17 @@ func main() {
 			return
 		}
 
-		conn := get_db_connection()
-		defer func(conn *sql.DB) {
-			err := conn.Close()
-			if err != nil {
-				fmt.Println("[ERROR] Failed to defer database connection in /api/deleteacct at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-				c.String(500, "Failed to defer database connection")
-				return
-			}
-		}(conn)
-
 		result, err := conn.Exec("DELETE FROM passwords WHERE key = ? AND value = ?", data["username"].(string), data["password"].(string))
 		if err != nil {
-			fmt.Println("[ERROR] Failed to query database in /api/deleteacct at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-			c.String(500, "Failed to query database")
+			log.Println("[ERROR] Failed to query database in /api/deleteacct at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+			c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-API-DELETEACCT-DBQUERY")
 		} else {
-			rowsaffected, err := result.RowsAffected()
+			rowsAffected, err := result.RowsAffected()
 			if err != nil {
-				fmt.Println("[ERROR] Failed to get rows affected in /api/deleteacct at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-				c.String(500, "Failed to get rows affected")
+				log.Println("[ERROR] Failed to get rows affected in /api/deleteacct at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+				c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-API-DELETEACCT-ROWSAFFECTED")
 			} else {
-				if rowsaffected == int64(0) {
+				if rowsAffected == int64(0) {
 					c.String(401, "Invalid username or password")
 				} else {
 					c.String(200, "Success")
@@ -291,37 +273,27 @@ func main() {
 			return
 		}
 
-		conn := get_db_connection()
-		defer func(conn *sql.DB) {
-			err := conn.Close()
-			if err != nil {
-				fmt.Println("[ERROR] Failed to defer database connection in /api/changepass at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-				c.String(500, "Failed to defer database connection")
-				return
-			}
-		}(conn)
-
-		newhash, err := computeBcrypt(10, data["newpass"].(string))
+		newHash, err := computeBcrypt(10, data["newpass"].(string))
 		if err != nil {
-			fmt.Println("[ERROR] Failed to hash password in /api/changepass at", time.Now().Unix(), err)
-			c.String(500, "Failed to hash password")
+			log.Println("[ERROR] Failed to hash password in /api/changepass at", time.Now().Unix(), err)
+			c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-API-CHANGEPASS-PASSHASH")
 			return
 		}
 
-		result, err := conn.Exec("UPDATE passwords SET value = ? WHERE key = ? AND value = ?", newhash, data["username"].(string), data["password"].(string))
+		result, err := conn.Exec("UPDATE passwords SET value = ? WHERE key = ? AND value = ?", newHash, data["username"].(string), data["password"].(string))
 		if err != nil {
-			fmt.Println("[ERROR] Failed to query database in /api/changepass at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-			c.String(500, "Failed to query database")
+			log.Println("[ERROR] Failed to query database in /api/changepass at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+			c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-API-CHANGEPASS-DBQUERY")
 		} else {
-			rowsaffected, err := result.RowsAffected()
+			rowsAffected, err := result.RowsAffected()
 			if err != nil {
-				fmt.Println("[ERROR] Failed to get rows affected in /api/changepass at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
-				c.String(500, "Failed to get rows affected")
+				log.Println("[ERROR] Failed to get rows affected in /api/changepass at", strconv.FormatInt(time.Now().Unix(), 10)+":", err)
+				c.String(500, "Something went wrong on our end. Please report this bug at https://centrifuge.hectabit.org/hectabit/ctamail and refer to the docs for more info. Your error code is: UNKNOWN-API-CHANGEPASS-ROWSAFFECTED")
 			} else {
-				if rowsaffected == int64(0) {
+				if rowsAffected == int64(0) {
 					c.String(401, "Invalid username or password")
 				} else {
-					c.JSON(200, gin.H{"password": newhash})
+					c.JSON(200, gin.H{"password": newHash})
 				}
 			}
 		}
@@ -391,11 +363,10 @@ func main() {
 		c.HTML(200, "cta.html", gin.H{})
 	})
 
-	fmt.Println("[INFO] Server started at", time.Now().Unix())
-	fmt.Println("[INFO] Welcome to CTAMail! Today we are running on IP " + HOST + " on port " + PORT + ".")
-	err := router.Run(HOST + ":" + PORT)
+	log.Println("[INFO] Server started at", time.Now().Unix())
+	log.Println("[INFO] Welcome to CTAMail! Today we are running on IP " + host + " on port " + port + ".")
+	err = router.Run(host + ":" + port)
 	if err != nil {
-		fmt.Println("[FATAL] Server failed to start at", time.Now().Unix(), err)
-		return
+		log.Fatalln("[FATAL] Server failed begin operations at", time.Now().Unix(), err)
 	}
 }
